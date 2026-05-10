@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.{Linear.Adapter, Notion}
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -36,6 +36,33 @@ defmodule SymphonyElixir.ExtensionsTest do
         _ ->
           Process.get({__MODULE__, :graphql_result})
       end
+    end
+  end
+
+  defmodule FakeNotionClient do
+    def fetch_candidate_issues do
+      send(self(), :notion_fetch_candidate_issues_called)
+      {:ok, [:notion_candidate]}
+    end
+
+    def fetch_issues_by_states(states) do
+      send(self(), {:notion_fetch_issues_by_states_called, states})
+      {:ok, states}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) do
+      send(self(), {:notion_fetch_issue_states_by_ids_called, issue_ids})
+      {:ok, issue_ids}
+    end
+
+    def append_comment(issue_id, body) do
+      send(self(), {:notion_append_comment_called, issue_id, body})
+      :ok
+    end
+
+    def update_page_properties(issue_id, fields) do
+      send(self(), {:notion_update_page_properties_called, issue_id, fields})
+      :ok
     end
   end
 
@@ -79,12 +106,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   setup do
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
+    notion_client_module = Application.get_env(:symphony_elixir, :notion_client_module)
 
     on_exit(fn ->
       if is_nil(linear_client_module) do
         Application.delete_env(:symphony_elixir, :linear_client_module)
       else
         Application.put_env(:symphony_elixir, :linear_client_module, linear_client_module)
+      end
+
+      if is_nil(notion_client_module) do
+        Application.delete_env(:symphony_elixir, :notion_client_module)
+      else
+        Application.put_env(:symphony_elixir, :notion_client_module, notion_client_module)
       end
     end)
 
@@ -203,6 +237,33 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "notion",
+      tracker_database_id: "database-1"
+    )
+
+    assert SymphonyElixir.Tracker.adapter() == Notion.Adapter
+  end
+
+  test "notion adapter delegates reads and writes" do
+    Application.put_env(:symphony_elixir, :notion_client_module, FakeNotionClient)
+
+    assert {:ok, [:notion_candidate]} = Notion.Adapter.fetch_candidate_issues()
+    assert_receive :notion_fetch_candidate_issues_called
+
+    assert {:ok, ["Queued"]} = Notion.Adapter.fetch_issues_by_states(["Queued"])
+    assert_receive {:notion_fetch_issues_by_states_called, ["Queued"]}
+
+    assert {:ok, ["page-1"]} = Notion.Adapter.fetch_issue_states_by_ids(["page-1"])
+    assert_receive {:notion_fetch_issue_states_by_ids_called, ["page-1"]}
+
+    assert :ok = Notion.Adapter.create_comment("page-1", "hello")
+    assert_receive {:notion_append_comment_called, "page-1", "hello"}
+
+    assert :ok = Notion.Adapter.update_issue_state("page-1", "Done")
+
+    assert_receive {:notion_update_page_properties_called, "page-1", %{"last_run_at" => %DateTime{}, "status" => "Done"}}
   end
 
   test "linear adapter delegates reads and validates mutation responses" do

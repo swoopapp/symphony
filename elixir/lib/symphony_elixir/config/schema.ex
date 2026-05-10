@@ -44,11 +44,15 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
 
+    @linear_endpoint "https://api.linear.app/graphql"
+    @notion_endpoint "https://api.notion.com/v1"
+
     embedded_schema do
       field(:kind, :string)
-      field(:endpoint, :string, default: "https://api.linear.app/graphql")
+      field(:endpoint, :string, default: @linear_endpoint)
       field(:api_key, :string)
       field(:project_slug, :string)
+      field(:database_id, :string)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
@@ -59,10 +63,16 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :database_id, :assignee, :active_states, :terminal_states],
         empty_values: []
       )
     end
+
+    @doc false
+    @spec default_endpoint(String.t() | nil, String.t() | nil) :: String.t() | nil
+    def default_endpoint("notion", endpoint) when endpoint in [nil, "", @linear_endpoint], do: @notion_endpoint
+    def default_endpoint(_kind, endpoint) when endpoint in [nil, ""], do: @linear_endpoint
+    def default_endpoint(_kind, endpoint), do: endpoint
   end
 
   defmodule Polling do
@@ -368,7 +378,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
+      | endpoint: Tracker.default_endpoint(settings.tracker.kind, settings.tracker.endpoint),
+        api_key: resolve_tracker_api_key(settings.tracker),
         assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
     }
 
@@ -420,6 +431,14 @@ defmodule SymphonyElixir.Config.Schema do
       resolved when is_binary(resolved) -> normalize_secret_value(resolved)
       resolved -> resolved
     end
+  end
+
+  defp resolve_tracker_api_key(%Tracker{kind: "notion", api_key: api_key}) do
+    resolve_secret_setting(api_key, System.get_env("NOTION_API_KEY"))
+  end
+
+  defp resolve_tracker_api_key(%Tracker{api_key: api_key}) do
+    resolve_secret_setting(api_key, System.get_env("LINEAR_API_KEY"))
   end
 
   defp resolve_path_value(value, default) when is_binary(value) do

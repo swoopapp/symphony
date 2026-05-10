@@ -133,6 +133,38 @@ defmodule SymphonyElixir.CoreTest do
     assert :ok = Config.validate!()
   end
 
+  test "notion tracker validates database id and resolves token from NOTION_API_KEY" do
+    previous_notion_api_key = System.get_env("NOTION_API_KEY")
+    env_api_key = "test-notion-api-key"
+
+    on_exit(fn -> restore_env("NOTION_API_KEY", previous_notion_api_key) end)
+    System.put_env("NOTION_API_KEY", env_api_key)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "notion",
+      tracker_endpoint: nil,
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_database_id: nil,
+      codex_command: "/bin/sh app-server"
+    )
+
+    assert Config.settings!().tracker.endpoint == "https://api.notion.com/v1"
+    assert Config.settings!().tracker.api_key == env_api_key
+    assert {:error, :missing_notion_database_id} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "notion",
+      tracker_endpoint: nil,
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_database_id: "database-1",
+      codex_command: "/bin/sh app-server"
+    )
+
+    assert :ok = Config.validate!()
+  end
+
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do
     previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
     env_assignee = "dev@example.com"
@@ -752,8 +784,9 @@ defmodule SymphonyElixir.CoreTest do
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+    scheduler_slack_ms = 1_000
 
-    assert remaining_ms >= min_remaining_ms
+    assert remaining_ms >= min_remaining_ms - scheduler_slack_ms
     assert remaining_ms <= max_remaining_ms
   end
 

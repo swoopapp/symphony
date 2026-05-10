@@ -3,11 +3,15 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Linear.Client, Notion}
 
   @linear_graphql_tool "linear_graphql"
+  @notion_task_update_tool "notion_task_update"
   @linear_graphql_description """
   Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.
+  """
+  @notion_task_update_description """
+  Update the current Notion queue task using Symphony's configured Notion auth.
   """
   @linear_graphql_input_schema %{
     "type" => "object",
@@ -25,12 +29,54 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   }
+  @notion_task_update_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["page_id"],
+    "properties" => %{
+      "page_id" => %{
+        "type" => "string",
+        "description" => "Notion page ID for the queue task."
+      },
+      "status" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional Status select value, for example Running, Done, Failed, or Blocked."
+      },
+      "branch" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional git branch name to write to the Branch property."
+      },
+      "pr_url" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional pull request URL to write to the PR URL property."
+      },
+      "agent_summary" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional final summary to write to the Agent Summary property."
+      },
+      "error" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional error or blocker details to write to the Error property."
+      },
+      "run_agent" => %{
+        "type" => ["boolean", "null"],
+        "description" => "Optional Run Agent checkbox value."
+      },
+      "comment" => %{
+        "type" => ["string", "null"],
+        "description" => "Optional note to append to the task page body."
+      }
+    }
+  }
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @notion_task_update_tool ->
+        execute_notion_task_update(arguments, opts)
 
       other ->
         failure_response(%{
@@ -49,6 +95,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @notion_task_update_tool,
+        "description" => @notion_task_update_description,
+        "inputSchema" => @notion_task_update_input_schema
       }
     ]
   end
@@ -110,6 +161,91 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     end
   end
 
+  defp execute_notion_task_update(arguments, opts) do
+    notion_client = Keyword.get(opts, :notion_client, Notion.Client)
+
+    with {:ok, page_id, fields, comment} <- normalize_notion_task_update_arguments(arguments),
+         :ok <- maybe_update_notion_page(notion_client, page_id, fields),
+         :ok <- maybe_append_notion_comment(notion_client, page_id, comment) do
+      dynamic_tool_response(
+        true,
+        encode_payload(%{
+          "ok" => true,
+          "page_id" => page_id,
+          "updated_fields" => Map.keys(fields)
+        })
+      )
+    else
+      {:error, reason} ->
+        failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp normalize_notion_task_update_arguments(arguments) when is_map(arguments) do
+    case Map.get(arguments, "page_id") || Map.get(arguments, :page_id) do
+      page_id when is_binary(page_id) ->
+        fields = notion_update_fields(arguments)
+        comment = Map.get(arguments, "comment") || Map.get(arguments, :comment)
+
+        cond do
+          String.trim(page_id) == "" ->
+            {:error, :missing_notion_page_id}
+
+          map_size(fields) == 0 and blank_comment?(comment) ->
+            {:error, :empty_notion_update}
+
+          true ->
+            {:ok, page_id, fields, comment}
+        end
+
+      _ ->
+        {:error, :missing_notion_page_id}
+    end
+  end
+
+  defp normalize_notion_task_update_arguments(_arguments), do: {:error, :invalid_notion_update_arguments}
+
+  defp notion_update_fields(arguments) do
+    Enum.reduce(
+      ["status", "branch", "pr_url", "agent_summary", "error", "run_agent"],
+      %{},
+      fn field, acc ->
+        case Map.fetch(arguments, field) do
+          {:ok, value} -> Map.put(acc, field, value)
+          :error -> fetch_atom_field(arguments, field, acc)
+        end
+      end
+    )
+  end
+
+  defp fetch_atom_field(arguments, field, acc) do
+    atom_field = String.to_existing_atom(field)
+
+    case Map.fetch(arguments, atom_field) do
+      {:ok, value} -> Map.put(acc, field, value)
+      :error -> acc
+    end
+  rescue
+    ArgumentError -> acc
+  end
+
+  defp maybe_update_notion_page(_notion_client, _page_id, fields) when map_size(fields) == 0, do: :ok
+
+  defp maybe_update_notion_page(notion_client, page_id, fields) do
+    notion_client.update_page_properties(page_id, Map.put(fields, "last_run_at", DateTime.utc_now()))
+  end
+
+  defp maybe_append_notion_comment(_notion_client, _page_id, comment) when comment in [nil, ""], do: :ok
+
+  defp maybe_append_notion_comment(notion_client, page_id, comment) when is_binary(comment) do
+    notion_client.append_comment(page_id, comment)
+  end
+
+  defp maybe_append_notion_comment(_notion_client, _page_id, _comment), do: {:error, :invalid_notion_comment}
+
+  defp blank_comment?(comment) when is_binary(comment), do: String.trim(comment) == ""
+  defp blank_comment?(comment), do: comment in [nil, ""]
+
   defp graphql_response(response) do
     success =
       case response do
@@ -164,6 +300,81 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_notion_page_id) do
+    %{
+      "error" => %{
+        "message" => "`notion_task_update` requires a non-empty `page_id` string."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_notion_update_arguments) do
+    %{
+      "error" => %{
+        "message" => "`notion_task_update` expects an object with `page_id` and at least one supported update field."
+      }
+    }
+  end
+
+  defp tool_error_payload(:empty_notion_update) do
+    %{
+      "error" => %{
+        "message" => "`notion_task_update` requires at least one field or comment to update."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_notion_comment) do
+    %{
+      "error" => %{
+        "message" => "`notion_task_update.comment` must be a string when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_notion_api_token) do
+    %{
+      "error" => %{
+        "message" => "Symphony is missing Notion auth. Set `tracker.api_key` in `WORKFLOW.md` or export `NOTION_API_KEY`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_notion_database_id) do
+    %{
+      "error" => %{
+        "message" => "Symphony is missing a Notion database ID. Set `tracker.database_id` in `WORKFLOW.md`."
+      }
+    }
+  end
+
+  defp tool_error_payload({:notion_api_status, status}) do
+    %{
+      "error" => %{
+        "message" => "Notion API request failed with HTTP #{status}.",
+        "status" => status
+      }
+    }
+  end
+
+  defp tool_error_payload({:notion_api_request, reason}) do
+    %{
+      "error" => %{
+        "message" => "Notion API request failed before receiving a successful response.",
+        "reason" => inspect(reason)
+      }
+    }
+  end
+
+  defp tool_error_payload({:notion_api_error, body}) do
+    %{
+      "error" => %{
+        "message" => "Notion API returned an error payload.",
+        "body" => body
       }
     }
   end

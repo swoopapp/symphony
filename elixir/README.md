@@ -23,6 +23,10 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
+This local fork also includes an experimental Notion tracker adapter for queue-style task
+databases. During app-server sessions, Symphony serves a `notion_task_update` tool so the agent can
+write task status, branch, PR URL, summary, errors, and comments back to the Notion task page.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
@@ -30,8 +34,11 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
+2. Get tracker credentials:
+   - Linear: create a personal token in Linear via Settings → Security & access → Personal API keys,
+     and set it as the `LINEAR_API_KEY` environment variable.
+   - Notion: create/share an integration with your queue database parent page, and set its secret as
+     the `NOTION_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
@@ -107,6 +114,42 @@ You are working on a Linear issue {{ issue.identifier }}.
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
 
+Minimal Notion example:
+
+```md
+---
+tracker:
+  kind: notion
+  database_id: "..."
+  active_states:
+    - Queued
+    - Running
+  terminal_states:
+    - Done
+    - Failed
+    - Blocked
+workspace:
+  root: ~/code/workspaces
+hooks:
+  after_create: |
+    git clone git@github.com:your-org/your-repo.git .
+agent:
+  max_concurrent_agents: 1
+  max_turns: 5
+codex:
+  command: codex app-server
+---
+
+You are working on a Notion task `{{ issue.identifier }}`.
+
+Task page ID: {{ issue.id }}
+Title: {{ issue.title }}
+Body: {{ issue.description }}
+
+Use `notion_task_update` to move the page to Running when you start and Done, Failed, or Blocked
+when you finish.
+```
+
 Notes:
 
 - If a value is missing, defaults are used.
@@ -127,7 +170,7 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.api_key` reads from `LINEAR_API_KEY` for Linear or `NOTION_API_KEY` for Notion when unset.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
